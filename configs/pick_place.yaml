@@ -28,7 +28,7 @@ env:
   lift_height: 0.08         # 8cm above ground
   hold_steps: 10            # Not used for place task
   reward_type: "dense"
-  reward_version: "v20"     # Pick-and-place reward (new!)
+  reward_version: "v21"     # Pick-and-place with improved grasp incentives (RECOMMENDED)
   curriculum_stage: 3       # Gripper near cube, open
   lock_wrist: false         # Agent controls gripper for release
   place_target: [0.35, 0.10]  # Target XY position (~15cm from start)

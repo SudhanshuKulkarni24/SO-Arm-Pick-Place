@@ -12,6 +12,7 @@ from stable_baselines3 import SAC
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from src.envs.pick_cube import PickCubeEnv
+from src.envs.pick_place import PickPlaceEnv
 
 
 def main():
@@ -23,6 +24,8 @@ def main():
     parser.add_argument("--record", action="store_true", help="Record videos to exp_dir/videos/")
     parser.add_argument("--width", type=int, default=None, help="Video width (default: from config)")
     parser.add_argument("--height", type=int, default=None, help="Video height (default: from config)")
+    parser.add_argument("--env", type=str, default=None, choices=["pick_cube", "pick_place"], 
+                        help="Environment type (default: auto-detect from config)")
     args = parser.parse_args()
 
     # Load experiment directory
@@ -72,8 +75,28 @@ def main():
     model = SAC.load(model_path)
     print(f"Loaded model from {model_path}")
 
+    # Determine environment type
+    env_type = args.env
+    if env_type is None:
+        # Auto-detect from config or experiment directory name
+        if "pick_place" in str(exp_dir):
+            env_type = "pick_place"
+        else:
+            env_type = config.get("env_type", "pick_cube") if config_path.exists() else "pick_cube"
+    
     # Create environment
-    env = PickCubeEnv(render_mode=None)
+    if env_type == "pick_place":
+        env_cfg = config.get("env", {}) if config_path.exists() else {}
+        env = PickPlaceEnv(
+            render_mode=None,
+            place_target=env_cfg.get("place_target", (0.35, 0.10)),
+            randomize_cube=False,
+            randomize_target=False,
+        )
+        print(f"Using PickPlaceEnv with target={env.place_target}")
+    else:
+        env = PickCubeEnv(render_mode=None)
+        print("Using PickCubeEnv")
 
     # Load normalization stats if available
     vec_normalize_path = exp_dir / "vec_normalize.pkl"
