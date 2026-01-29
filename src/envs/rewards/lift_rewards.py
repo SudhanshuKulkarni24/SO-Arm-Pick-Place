@@ -402,3 +402,211 @@ def reward_v22(env, info: dict, was_grasping: bool = False, action: np.ndarray |
         reward += 15.0
     
     return reward
+
+
+def reward_v23(env, info: dict, was_grasping: bool = False, action: np.ndarray | None = None) -> float:
+    """V23: Pick-and-place with action-aware shaping.
+    
+    Key improvements over v21:
+    - Penalizes downward motion when gripper is closed (prevents pushing)
+    - Only rewards gripper closing when cube contacts are detected
+    - Lift reward scaled by upward action to encourage lifting
+    - Stronger grasp + lift coupling
+    
+    This prevents the "press down and close" local optimum.
+    """
+    reward = 0.0
+    cube_pos = info["cube_pos"]
+    cube_z = info["cube_z"]
+    gripper_to_cube = info["gripper_to_cube"]
+    is_grasping = info["is_grasping"]
+    gripper_state = info.get("gripper_state", 1.0)  # 1=open, 0=closed
+    has_static = info.get("has_gripper_contact", False)
+    has_moving = info.get("has_jaw_contact", False)
+    has_any_contact = has_static or has_moving
+    
+    place_target = info.get("place_target")
+    cube_to_target = info.get("cube_to_target", float('inf'))
+    is_placed = info.get("is_placed", False)
+    step_count = getattr(env, '_step_count', 0)
+    
+    # Get action Z component (for shaping lift behavior)
+    action_z = action[2] if action is not None else 0.0
+    is_gripper_closed = gripper_state < 0.3
+    
+    # ========== PHASE 1: REACH ==========
+    reach_reward = 1.0 - np.tanh(8.0 * gripper_to_cube)
+    reward += reach_reward * 0.3  # Low weight - just for guidance
+    
+    # ========== GRIPPER CLOSING - only when contacting cube ==========
+    if gripper_to_cube < 0.05 and has_any_contact:
+        # Reward closing when we have contact
+        close_reward = (1.0 - gripper_state) * 1.0
+        reward += close_reward
+    
+    # ========== ANTI-PUSHING PENALTY ==========
+    # Penalize pressing down when gripper is closed but not grasping
+    if is_gripper_closed and not is_grasping and action_z < -0.3:
+        # Pushing down with closed gripper = bad (pushing cube)
+        reward -= 1.5
+    
+    # Push-down penalty on cube
+    if cube_z < 0.008:
+        reward -= 2.0
+    elif cube_z < 0.012:
+        reward -= (0.012 - cube_z) * 50.0
+    
+    # ========== PHASE 2: GRASP ==========
+    if is_grasping:
+        reward += 2.0  # Grasp maintenance bonus
+        
+        # ========== PHASE 3: LIFT ==========
+        # Reward lifting action when grasping
+        if action_z > 0:
+            reward += action_z * 1.0  # Encourage upward motion
+        
+        # Lift progress reward
+        lift_progress = max(0, cube_z - 0.015) / max(0.001, env.lift_height - 0.015)
+        lift_progress = min(1.0, lift_progress)
+        reward += lift_progress * 4.0  # Strong lift reward
+        
+        # Milestone bonuses
+        if cube_z > 0.025:
+            reward += 1.5
+        if cube_z > 0.04:
+            reward += 1.5
+        if cube_z > env.lift_height:
+            reward += 3.0
+        
+        # ========== PHASE 4: TRANSPORT ==========
+        if place_target is not None and cube_z > env.lift_height * 0.6:
+            transport_reward = 1.0 - np.tanh(5.0 * cube_to_target)
+            reward += transport_reward * 2.5
+            
+            if cube_to_target < 0.04:
+                reward += 3.0
+            if cube_to_target < 0.02:
+                reward += 2.0
+        
+        # ========== PHASE 5: LOWER ==========
+        if place_target is not None and cube_to_target < 0.05:
+            if cube_z < env.lift_height and cube_z > 0.015:
+                lower_progress = 1.0 - (cube_z - 0.015) / max(0.001, env.lift_height - 0.015)
+                reward += lower_progress * 2.0
+    
+    else:
+        # NOT GRASPING
+        
+        # Time penalty after initial reaching phase
+        if step_count > 30:
+            time_penalty = min(0.3, (step_count - 30) * 0.003)
+            reward -= time_penalty
+        
+        # Encourage upward motion to position for grasp (not downward)
+        if gripper_to_cube < 0.04 and action_z > 0.2:
+            reward += 0.3
+        
+        # Drop handling
+        if was_grasping:
+            if cube_to_target < 0.03 and cube_z < 0.025:
+                reward += 5.0  # Good placement
+            elif cube_to_target > 0.05:
+                reward -= 3.0
+            elif cube_z > 0.03:
+                reward -= 2.0
+    
+    # ========== SUCCESS ==========
+    if is_placed:
+        reward += 20.0
+    
+    # ========== SMOOTHNESS ==========
+    if action is not None:
+        action_delta = action - env._prev_action
+        reward -= 0.003 * np.sum(action_delta**2)
+    
+    return reward
+
+
+def reward_v24(env, info: dict, was_grasping: bool = False, action: np.ndarray | None = None) -> float:
+    """V24: Simple positive-focused reward for pick-and-place.
+    
+    Key principles:
+    - Mostly positive rewards to encourage exploration
+    - Big bonuses for key milestones (grasp, lift, transport, place)
+    - Minimal penalties (only for catastrophic failures)
+    - Simple structure that's easy to optimize
+    
+    This is more forgiving than v23 which had too many penalties.
+    """
+    reward = 0.0
+    cube_z = info["cube_z"]
+    gripper_to_cube = info["gripper_to_cube"]
+    is_grasping = info["is_grasping"]
+    gripper_state = info.get("gripper_state", 1.0)
+    
+    place_target = info.get("place_target")
+    cube_to_target = info.get("cube_to_target", float('inf'))
+    is_placed = info.get("is_placed", False)
+    
+    # ========== ALWAYS-ON REWARDS (exploration friendly) ==========
+    
+    # 1. Reach reward - always positive, guides toward cube
+    reach_reward = 1.0 - np.tanh(5.0 * gripper_to_cube)
+    reward += reach_reward  # 0 to 1.0
+    
+    # 2. Gripper closing when close to cube
+    if gripper_to_cube < 0.06:
+        close_bonus = (1.0 - gripper_state) * 0.5
+        reward += close_bonus  # 0 to 0.5
+    
+    # ========== GRASP MILESTONE ==========
+    if is_grasping:
+        reward += 3.0  # Big bonus for grasping!
+        
+        # ========== LIFT REWARDS ==========
+        # Scale with height - very generous
+        lift_reward = min(1.0, cube_z / env.lift_height) * 5.0
+        reward += lift_reward  # 0 to 5.0
+        
+        # Milestone bonuses
+        if cube_z > 0.03:
+            reward += 2.0
+        if cube_z > 0.05:
+            reward += 2.0
+        if cube_z > env.lift_height:
+            reward += 3.0
+        
+        # ========== TRANSPORT (only when lifted) ==========
+        if cube_z > env.lift_height * 0.5:
+            transport_reward = (1.0 - np.tanh(3.0 * cube_to_target)) * 3.0
+            reward += transport_reward
+            
+            # At target bonus
+            if cube_to_target < 0.05:
+                reward += 2.0
+            if cube_to_target < 0.03:
+                reward += 2.0
+        
+        # ========== LOWERING AT TARGET ==========
+        if cube_to_target < 0.05 and cube_z < env.lift_height:
+            # Reward for being low at target (ready to release)
+            lower_reward = (1.0 - cube_z / env.lift_height) * 2.0
+            reward += lower_reward
+    
+    # ========== PENALTIES (minimal, only for bad outcomes) ==========
+    
+    # Only penalize dropping far from target
+    if was_grasping and not is_grasping:
+        if cube_to_target > 0.05:
+            reward -= 2.0  # Dropped away from target
+    
+    # Penalize cube falling off table
+    if cube_z < 0.005:
+        reward -= 1.0
+    
+    # ========== SUCCESS BONUS ==========
+    if is_placed:
+        reward += 25.0  # Big success bonus!
+    
+    return reward
+

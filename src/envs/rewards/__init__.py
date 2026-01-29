@@ -11,7 +11,7 @@ Legacy rewards (for checkpoint compatibility only):
 - v20: Pick-and-place (has local optima issues)
 """
 
-from .lift_rewards import reward_v11, reward_v19, reward_v20, reward_v21, reward_v22
+from .lift_rewards import reward_v11, reward_v19, reward_v20, reward_v21, reward_v22, reward_v23, reward_v24
 from ._legacy_rewards import (
     reward_v1,
     reward_v2,
@@ -59,10 +59,14 @@ REWARD_FUNCTIONS = {
     "v19": reward_v19,
     # Legacy pick-and-place (has local optima issues)
     "v20": reward_v20,
-    # Working (pick-and-place with improved grasp incentives) - RECOMMENDED
+    # Pick-and-place with grasp incentives (can get stuck pressing down)
     "v21": reward_v21,
     # Sparse milestone reward (alternative)
     "v22": reward_v22,
+    # Action-aware pick-and-place (too punitive)
+    "v23": reward_v23,
+    # Simple positive-focused reward - RECOMMENDED
+    "v24": reward_v24,
 }
 
-__all__ = ["REWARD_FUNCTIONS", "reward_v11", "reward_v19", "reward_v20", "reward_v21", "reward_v22"]
+__all__ = ["REWARD_FUNCTIONS", "reward_v11", "reward_v19", "reward_v20", "reward_v21", "reward_v22", "reward_v23", "reward_v24"]

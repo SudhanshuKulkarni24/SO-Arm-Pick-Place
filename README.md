@@ -51,7 +51,7 @@ PYTHONPATH=. uv run python train_pick_place.py --config configs/pick_place.yaml 
 
 ```bash
 # Evaluate with video recording
-PYTHONPATH=. uv run python eval.py --exp-dir runs/pick_place/20260128_211005 --episodes 10 --record
+PYTHONPATH=. uv run python eval.py --exp-dir runs/pick_place/<timestamp> --episodes 10 --record
 ```
 
 ## Environment Details
@@ -85,122 +85,113 @@ PYTHONPATH=. uv run python eval.py --exp-dir runs/pick_place/20260128_211005 --e
 | Lift height | 0.08m | Transport height |
 | Target radius | 0.02m | Success threshold |
 
-## Reward Function (v21)
+## Reward Function (v24)
 
-The reward function is designed with 5 phases to guide the agent through the pick-and-place sequence. v21 includes improved grasp incentives to prevent the "pushing" local optimum.
+The reward function uses a **simple positive-focused design** that encourages exploration while providing clear milestones for the pick-and-place task.
 
-### Key Improvements in v21 (over v20)
+### Key Principles in v24
 
-- **Gripper closing incentive** when near cube (prevents pushing)
-- **Time penalty** for not grasping (forces early grasp)
-- **Larger grasp bonus** (+3.0 vs +0.5)
-- **Gated rewards**: transport/place rewards require grasping
+- **Mostly positive rewards**: Encourages exploration (random actions give ~0.5 reward)
+- **Big milestone bonuses**: Clear signal for grasp (+3), lift (+5), transport (+3), success (+25)
+- **Minimal penalties**: Only for catastrophic failures (dropping far from target)
+- **Simple structure**: Easy to optimize, no complex action-dependent shaping
 
-### Phase 1: Reach (→ Cube)
+### Phase 1: Reach (Always Active)
 
 ```
-reach_reward = (1.0 - tanh(8.0 × gripper_to_cube_distance)) × 0.5
+reach_reward = 1.0 - tanh(5.0 × gripper_to_cube_distance)  # 0 to 1.0
 ```
 
-Reduced weight (0.5) to prevent farming reach reward without grasping.
-
-**Gripper closing incentive** (when within 5cm of cube):
+**Gripper closing bonus** (when close to cube):
 ```
-close_reward = (1.0 - gripper_state) × 1.5   # gripper_state: 1=open, 0=closed
-extra_close = (1.0 - gripper_state) × 1.0    # if within 3cm
-```
-
-**Push-down penalty:**
-```
-if cube_z < 0.005: penalty = -2.0
-if cube_z < 0.01:  penalty = -(0.01 - cube_z) × 100.0
+if gripper_to_cube < 0.06:
+    close_bonus = (1.0 - gripper_state) × 0.5  # 0 to 0.5
 ```
 
 ### Phase 2: Grasp
 
 When grasping (both finger pads contact cube + gripper closed):
 ```
-grasp_bonus = +3.0  (large bonus to incentivize grasping!)
+grasp_bonus = +3.0  (big bonus for achieving grasp!)
 ```
 
 ### Phase 3: Lift (while grasping)
 
 ```
-lift_reward = min(1.0, (cube_z - 0.015) / (lift_height - 0.015)) × 3.0
-milestone_2cm = +1.0  (if cube_z > 0.02m)
-milestone_4cm = +1.0  (if cube_z > 0.04m)
-transport_ready = +2.0  (if cube_z > lift_height)
+# Generous lift reward scaled by height
+lift_reward = min(1.0, cube_z / lift_height) × 5.0  # 0 to 5.0
+
+# Milestone bonuses
+milestone_3cm = +2.0  (if cube_z > 0.03m)
+milestone_5cm = +2.0  (if cube_z > 0.05m)
+transport_ready = +3.0  (if cube_z > lift_height)
 ```
 
 ### Phase 4: Transport (→ Target)
 
-When cube is lifted (z > 60% of lift_height) AND grasping:
+When cube is lifted (z > 50% of lift_height) AND grasping:
 ```
-transport_reward = (1.0 - tanh(5.0 × cube_to_target_xy)) × 2.0
-at_target_4cm = +3.0  (if within 4cm)
-at_target_2cm = +2.0  (if within 2cm)
-```
-
-### Phase 5: Lower & Release
-
-When near target (< 5cm) AND grasping:
-```
-lowering_reward = (1.0 - (cube_z - 0.015) / (lift_height - 0.015)) × 2.0
+transport_reward = (1.0 - tanh(3.0 × cube_to_target_xy)) × 3.0
+at_target_5cm = +2.0  (if within 5cm)
+at_target_3cm = +2.0  (if within 3cm)
 ```
 
-When released at target:
+### Phase 5: Lower at Target
+
+When at target (< 5cm) AND grasping AND below lift height:
 ```
-good_release = +5.0  (if at target, cube on table)
+lower_reward = (1.0 - cube_z / lift_height) × 2.0
 ```
 
-### Penalties
+### Penalties (Minimal)
 
-**Time penalty** (encourages fast grasping):
+**Drop penalty** (only for bad drops):
 ```
-if not grasping and step > 50:
-    penalty = -min(0.5, (step - 50) × 0.005)
+if was_grasping and not grasping and cube_to_target > 0.05:
+    penalty = -2.0  # Only penalize dropping far from target
 ```
 
-**Drop penalty:**
-- Far from target (> 5cm) or at height (> 3cm): **-2.0 to -3.0**
+**Cube falling off table:**
+```
+if cube_z < 0.005:
+    penalty = -1.0
+```
 
 ### Success Bonus
 
 ```
-success_bonus = +20.0  (cube at target, on table, released)
+success_bonus = +25.0  (cube at target, on table, released)
 ```
 
 ### Reward Summary Table
 
 | Component | Condition | Reward |
 |-----------|-----------|--------|
-| Reach | Always | 0 to 0.5 |
-| Gripper close | < 5cm from cube | 0 to 2.5 |
-| Push penalty | cube_z < 0.01 | -2.0 to -1.0 |
+| Reach | Always | 0 to 1.0 |
+| Gripper close | < 6cm from cube | 0 to 0.5 |
 | **Grasp bonus** | Grasping | **+3.0** |
-| Lift progress | Grasping | 0 to 3.0 |
-| Milestone 2cm | cube_z > 0.02 | +1.0 |
-| Milestone 4cm | cube_z > 0.04 | +1.0 |
-| Transport ready | cube_z > 0.08 | +2.0 |
-| Transport | Lifted + grasping | 0 to 2.0 |
-| At target 4cm | < 4cm, grasping | +3.0 |
-| At target 2cm | < 2cm, grasping | +2.0 |
-| Lowering | Near target, grasping | 0 to 2.0 |
-| Good release | At target, on table | +5.0 |
-| **Success** | Task complete | **+20.0** |
-| Time penalty | Not grasping, step > 50 | -0.0 to -0.5 |
-| Drop (bad) | Far from target | -2.0 to -3.0 |
-| Action smoothness | Always | -0.005 × Δaction² |
+| Lift progress | Grasping | 0 to 5.0 |
+| Milestone 3cm | cube_z > 0.03 | +2.0 |
+| Milestone 5cm | cube_z > 0.05 | +2.0 |
+| Transport ready | cube_z > 0.08 | +3.0 |
+| Transport | Lifted + grasping | 0 to 3.0 |
+| At target 5cm | < 5cm, grasping | +2.0 |
+| At target 3cm | < 3cm, grasping | +2.0 |
+| Lowering | At target, grasping | 0 to 2.0 |
+| **Success** | Task complete | **+25.0** |
+| Drop (bad) | Far from target | -2.0 |
+| Cube fell | cube_z < 0.005 | -1.0 |
 
 ### Typical Episode Rewards
 
 | Outcome | Approximate Total Reward |
 |---------|-------------------------|
-| Failed to grasp (just pushing) | 50-100 |
-| Grasped but dropped early | 150-250 |
-| Lifted but missed target | 300-400 |
-| Near target but failed place | 400-500 |
-| **Successful placement** | **500-600+** |
+| Random exploration | 40-80 |
+| Reaching only | 80-150 |
+| Grasped briefly | 200-350 |
+| Grasped + lifted | 400-600 |
+| Lifted + transported | 600-800 |
+| **Successful placement** | **900-1200+** |
 
 ## Configuration
 
@@ -227,10 +218,19 @@ env:
   max_episode_steps: 400
   action_scale: 0.02
   lift_height: 0.08
-  reward_version: "v21"   # Pick-and-place reward with improved grasp incentives
+  reward_version: "v24"   # Simple positive-focused reward - RECOMMENDED
   curriculum_stage: 3     # Start with gripper near cube
   place_target: [0.35, 0.10]  # Target XY position
 ```
+
+## Reward Function History
+
+| Version | Description | Status |
+|---------|-------------|--------|
+| v20 | Basic pick-and-place | Local optima (pushing) |
+| v21 | Grasp incentives | Gets stuck pressing down |
+| v23 | Action-aware shaping | Too many penalties (negative rewards) |
+| **v24** | Simple positive-focused | **RECOMMENDED** |
 
 ## File Structure
 
